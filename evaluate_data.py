@@ -2,9 +2,11 @@ from __future__ import division
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+from celluloid import Camera
 
 
 def visualise_correspondences_ageing(methods, p=0.1, log=False,
+                                     prediction_filter='All', filter_threshold=25.0,
                                      average=True, dividing_line=True,
                                      gap=0.2, use_symmetry=False,
                                      label_areas=False, normalise=True,
@@ -19,6 +21,12 @@ def visualise_correspondences_ageing(methods, p=0.1, log=False,
     (Default: 0.1)
 
     bool :param log:    Whether or not to use log scale (Default: False)
+
+    String :param prediction_filter:    The group of test subjects to be examined, depending on the disparity between
+    chronological age and predicted brain age (Default: 'All')
+
+    float :param filter_threshold:  The threshold for the inlier/outlier categorisation in absolute percent
+    (Default: 25.0)
 
     bool :param average:    Whether or not to take the average number per region over all patients. If False, a random
     member is examined (Default: True)
@@ -63,8 +71,32 @@ def visualise_correspondences_ageing(methods, p=0.1, log=False,
             percent = p[m]
         else:
             percent = p
+
+        if isinstance(prediction_filter, list):
+            filter = prediction_filter[m]
+        else:
+            filter = prediction_filter
+
         # Load the appropriate correspondences file
         corresp = np.load('ageing_correspondences/{}_ageing_correspondences_{}%.npy'.format(method, int(100*percent)))
+
+        # Load the ages file
+        ages = np.load('test_data/test_ages_GCN.npy', allow_pickle=True)
+        # Load the predictions file
+        predictions = np.load('test_data/all_age_predictions.npy', allow_pickle=True).astype(np.float32)
+        # Calculate age prediction disparity
+        disparity = 100 * (np.abs(ages - predictions) / ages)
+
+        # Find individuals with relevant disparities according to the filter
+        if filter == 'Outliers':
+            disparity = (disparity > filter_threshold).astype(int)
+        elif filter == 'Inliers':
+            disparity = (disparity <= filter_threshold).astype(int)
+        else:
+            disparity = ages / ages
+
+        # Filter out the non-relevant correspondences and ages
+        corresp = corresp[disparity == 1, :]
 
         # Either take the average of the correspondences per area, or sample the correspondences for a random ID
         if average:
@@ -91,11 +123,15 @@ def visualise_correspondences_ageing(methods, p=0.1, log=False,
         # Create x-axis
         x_axis = np.linspace(start=1, stop=corresp.shape[0], num=corresp.shape[0])
 
+        # Create the appropriate label
+        lbl = '${}$ {}%'.format(method, int(100*percent))
+        if filter != 'All':
+            lbl = '{}% {} '.format(filter_threshold, filter) + lbl
         # Plot correspondence bars particular to the method and percentage
         ax.bar(x_axis - m*bar_width,
                corresp, width=bar_width,
                log=log,
-               label='${}$ {}%'.format(method, int(100*percent)))
+               label=lbl)
 
     # Create title string according to the parameterisation of the figure
     if isinstance(p, list):
@@ -110,6 +146,9 @@ def visualise_correspondences_ageing(methods, p=0.1, log=False,
 
     if average:
         title = 'Average ' + title
+
+    if (not isinstance(prediction_filter, list)) and (prediction_filter != 'All'):
+        title = '{}% {}` '.format(filter_threshold, prediction_filter) + title
 
     # Set the figure title
     ax.set_title(title, fontdict={'fontsize': 10,
@@ -154,6 +193,7 @@ def visualise_correspondences_ageing(methods, p=0.1, log=False,
 
 
 def visualise_lr_symmetry(method, p=0.1, log=False,
+                          prediction_filter='All', filter_threshold=25.0,
                           gap=0.2, label_areas=True,
                           normalise=True, save_fig=True):
     """
@@ -166,6 +206,12 @@ def visualise_lr_symmetry(method, p=0.1, log=False,
     float :param p: The top percentage of voxel activations to be visualised for the given method (Default: 0.1)
 
     bool :param log:    Whether or not to use logarithmic scale in the graph (Default: False)
+
+    String :param prediction_filter:    The group of test subjects to be examined, depending on the disparity between
+    chronological age and predicted brain age (Default: 'All')
+
+    float :param filter_threshold:  The threshold for the inlier/outlier categorisation in absolute percent
+    (Default: 25.0)
 
     float :param gap:   Size of the gap between bars (Default: 0.2)
 
@@ -189,6 +235,25 @@ def visualise_lr_symmetry(method, p=0.1, log=False,
 
     # Load appropriate correspondences file
     corresp = np.load('ageing_correspondences/{}_ageing_correspondences_{}%.npy'.format(method, int(100 * p)))
+
+    # Load the ages file
+    ages = np.load('test_data/test_ages_GCN.npy', allow_pickle=True)
+    # Load the predictions file
+    predictions = np.load('test_data/all_age_predictions.npy', allow_pickle=True).astype(np.float32)
+    # Calculate age prediction disparity
+    disparity = 100 * (np.abs(ages - predictions) / ages)
+
+    # Find individuals with relevant disparities according to the filter
+    if prediction_filter == 'Outliers':
+        disparity = (disparity > filter_threshold).astype(int)
+    elif prediction_filter == 'Inliers':
+        disparity = (disparity <= filter_threshold).astype(int)
+    else:
+        disparity = ages / ages
+
+    # Filter out the non-relevant correspondences and ages
+    corresp = corresp[disparity == 1, :]
+
     # Take the mean across individuals
     corresp = np.mean(corresp, axis=0)
 
@@ -226,6 +291,9 @@ def visualise_lr_symmetry(method, p=0.1, log=False,
     else:
         title = 'Number ' + title
     title = 'Average ' + title
+
+    if prediction_filter != 'All':
+        title = '{}% {}` '.format(filter_threshold, prediction_filter) + title
 
     # Set title
     ax.set_title(title, fontdict={'fontsize': 10,
@@ -460,6 +528,546 @@ def get_region_volume(region):
     return region_vol
 
 
+def sliding_age_window(method, p=0.1,
+                       prediction_filter='All', filter_threshold=25.0,
+                       window_size=10, n_to_label=5,
+                       normalise=True, save_fig=True,
+                       show_fig=True):
+    """
+    Displays graphs showing the correspondences between top-p% relevance activations per brain regions for a given
+    method across age brackets in the test set. A number of regions are selected as extremes for greatest/least maximum
+    relevance proportion and greatest/least standard deviation in relevance proportion.
+
+    String :param method:   The method whose heatmap correspondences to analyse
+
+    float :param p: The percentage of top-activations being examined for the given method (Default: 0.1)
+
+    String :param prediction_filter:    The group of test subjects to be examined, depending on the disparity between
+    chronological age and predicted brain age (Default: 'All')
+
+    float :param filter_threshold:  The threshold for the inlier/outlier categorisation in absolute percent
+    (Default: 25.0)
+
+    int :param window_size: The size (in years) of the age window over which correspondences in patients in the test set
+    are averaged (Default: 10)
+
+    int :param n_to_label:  The number of curves in each statistical extreme to examine (Default: 5)
+
+    bool :param normalise:  Whether or not to normalise region correspondence counts by the total number of voxels per
+    area (Default: True)
+
+    bool :param save_fig:   Whether or not to save the figures automatically (Default: True)
+
+    bool :param show_fig:   Whether or not to show the figures upon completion (Default: True)
+    """
+
+    # Load the appropriate correspondences file
+    corresp = np.load('ageing_correspondences/{}_ageing_correspondences_{}%.npy'.format(method, int(100 * p)),
+                      allow_pickle=True)
+    # Normalise the correspondence count by the total number of voxels in each region if necessary
+    if normalise:
+        all_vols = np.load('ageing_correspondences/region_volumes.npy', allow_pickle=True)
+        corresp = np.divide(corresp, all_vols)
+    # Load the ages file
+    ages = np.load('test_data/test_ages_GCN.npy', allow_pickle=True)
+    # Load the predictions file
+    predictions = np.load('test_data/all_age_predictions.npy', allow_pickle=True).astype(np.float32)
+    # Calculate age prediction disparity
+    disparity = 100 * (np.abs(ages - predictions) / ages)
+
+    # Find individuals with relevant disparities according to the filter
+    if prediction_filter == 'Outliers':
+        disparity = (disparity > filter_threshold).astype(int)
+    elif prediction_filter == 'Inliers':
+        disparity = (disparity <= filter_threshold).astype(int)
+    else:
+        disparity = ages/ages
+
+    # Filter out the non-relevant correspondences and ages
+    corresp = corresp[disparity == 1, :]
+    ages = ages[disparity == 1]
+
+    # Find the extreme ages
+    mx = np.max(ages)
+    mn = np.min(ages)
+    # print("Max age in test set: {}\nMin age in test set: {}\n".format(mx, mn))
+
+    # The first value assumed by the lowest value in the window (at the first step)
+    window_min = mn
+    # The highest possible value to be assumed by the lowest window value (at the final step)
+    window_max = mx - window_size
+    # The number of scans that will be completed by the window -- equal to the ceiling of the range in ages
+    rng = np.ceil(window_max - window_min + 1).astype(int)
+
+    # Initialise the array containing average of the correspondences for each window pass
+    corresp_per_window = np.zeros(shape=(rng, corresp.shape[1]))
+
+    for i in range(rng):
+        # Shift the beginning and end of the window to the next position
+        age_min = window_min + i
+        age_max = age_min + window_size
+
+        # Isolate ages lying in the window as ones on a background of zeros
+        ages_in_window = (ages >= age_min).astype(int) * (ages <= age_max).astype(int)
+
+        # Get the correspondences of the patients whose ages lie in the window
+        window_corresp = corresp[ages_in_window == 1]
+        # Average the correspondences across the individuals in the window
+        window_corresp = np.mean(window_corresp, axis=0)
+
+        # Enter the window correspondences into the array
+        corresp_per_window[i, :] = window_corresp
+
+    # Create the x-axis
+    x_axis = np.linspace(start=window_min, stop=window_min + rng - 1, num=rng)
+
+    # Get the maximum correspondence per brain region over age brackets
+    max_per_region = np.max(corresp_per_window, axis=0)
+    # Get the positions of the (Default: 5) regions with highest max correspondence proportion
+    max_n_regions = np.argsort(max_per_region)[-n_to_label:]
+    # Get the positions of the (Default: 5) regions with lowest max correspondence proportion
+    min_n_regions = np.argsort(max_per_region)[:n_to_label]
+
+    # Get the standard deviation of correspondences per brain region over age brackets
+    mean_per_region = np.std(corresp_per_window, axis=0)
+    # Get the positions of the (Default: 5) regions with highest SD in correspondences over age brackets
+    max_n_region_mean = np.argsort(mean_per_region)[-n_to_label:]
+    # Get the positions of the (Default: 5) regions with lowest SD in correspondences over age brackets
+    min_n_region_mean = np.argsort(mean_per_region)[:n_to_label]
+
+    # Get the standard deviation of correspondences per brain region over age brackets
+    sd_per_region = np.std(corresp_per_window, axis=0)
+    # Get the positions of the (Default: 5) regions with highest SD in correspondences over age brackets
+    max_n_region_sd = np.argsort(sd_per_region)[-n_to_label:]
+    # Get the positions of the (Default: 5) regions with lowest SD in correspondences over age brackets
+    min_n_region_sd = np.argsort(sd_per_region)[:n_to_label]
+
+    # Get the positions of the (Default: 5) regions with highest SD in correspondences over age brackets
+    max_n_region_rel_sd = np.argsort(sd_per_region/mean_per_region)[-n_to_label:]
+    # Get the positions of the (Default: 5) regions with lowest SD in correspondences over age brackets
+    min_n_region_rel_sd = np.argsort(sd_per_region/mean_per_region)[:n_to_label]
+
+    # Create the plotting criteria list over which to loop
+    criteria = [max_n_regions, min_n_regions,
+                max_n_region_mean, min_n_region_mean,
+                max_n_region_sd, min_n_region_sd,
+                max_n_region_rel_sd, min_n_region_rel_sd]
+
+    # Create the corresponding titles for plots
+    titles = [
+        'Maximum {} Top-{}% Correspondences per Region\nacross Age Groups via ${}$'.format(n_to_label,
+                                                                                           int(100 * p),
+                                                                                           method),
+        'Minimum {} Top-{}% Correspondences per Region\nacross Age Groups via ${}$'.format(n_to_label,
+                                                                                           int(100 * p),
+                                                                                           method),
+        '{} Top-{}% Correspondences with Maximum Mean\nper Region across Age Groups via ${}$'.format(n_to_label,
+                                                                                                     int(100 * p),
+                                                                                                     method),
+        '{} Top-{}% Correspondences with Minimum Mean\nper Region across Age Groups via ${}$'.format(n_to_label,
+                                                                                                     int(100 * p),
+                                                                                                     method),
+        '{} Top-{}% Correspondences with Maximum Standard Deviation\nper Region across Age Groups via ${}$'.format(
+            n_to_label,
+            int(100 * p),
+            method),
+        '{} Top-{}% Correspondences with Minimum Standard Deviation\nper Region across Age Groups via ${}$'.format(
+            n_to_label,
+            int(100 * p),
+            method),
+        '{} Top-{}% Correspondences with Maximum Relative Deviation\nper Region across Age Groups via ${}$'.format(
+            n_to_label,
+            int(100 * p),
+            method),
+        '{} Top-{}% Correspondences with Minimum Relative Deviation\nper Region across Age Groups via ${}$'.format(
+            n_to_label,
+            int(100 * p),
+            method)
+    ]
+    # Create the corresponding save paths for plots
+    save_files = [
+        '{}_top{}%_max_{}_per_age'.format(method, int(100 * p), n_to_label),
+        '{}_top{}%_min_{}_per_age'.format(method, int(100 * p), n_to_label),
+        '{}_top{}%_max_{}_mean_per_age'.format(method, int(100 * p), n_to_label),
+        '{}_top{}%_min_{}_mean_per_age'.format(method, int(100 * p), n_to_label),
+        '{}_top{}%_max_{}_sd_per_age'.format(method, int(100 * p), n_to_label),
+        '{}_top{}%_min_{}_sd_per_age'.format(method, int(100 * p), n_to_label),
+        '{}_top{}%_max_{}_rel_sd_per_age'.format(method, int(100 * p), n_to_label),
+        '{}_top{}%_min_{}_rel_sd_per_age'.format(method, int(100 * p), n_to_label)
+    ]
+
+    # Loop over the criteria to plot
+    for c, criterion in enumerate(criteria):
+        # Initialise the figure and axes
+        fig, ax = plt.subplots(1, 1, figsize=(12, 8))
+
+        # Loop over the brain regions
+        for j in range(corresp.shape[1]):
+            # If the index satisfies the criterion, plot and label the correspondences per age bracket for this region
+            if j in criterion:
+                ax.plot(x_axis, corresp_per_window[:, j], label=get_region_names([j + 1])[0])
+            # else:
+            #     ax.plot(x_axis, corresp_per_window[:, j])
+
+        if prediction_filter == 'Outliers':
+            # Edit title accordingly
+            titles[c] = '{}% MAPE Outliers` '.format(filter_threshold) + titles[c]
+            # Edit the save file name accordingly
+            save_files[c] = '{}%_out_'.format(int(filter_threshold)) + save_files[c]
+        elif prediction_filter == 'Outliers':
+            # Edit title accordingly
+            titles[c] = '{}% MAPE Inliers` '.format(filter_threshold) + titles[c]
+            # Edit the save file name accordingly
+            save_files[c] = '{}%_in_'.format(int(filter_threshold)) + save_files[c]
+        # Set the plot title
+        ax.set_title(titles[c])
+
+        # Set the x-axis label
+        ax.set_xlabel('Age bracket')
+
+        # Set the y-axis label according to whether or not we have normalised by the region volumes
+        if normalise:
+            ax.set_ylabel('Proportion of correspondences')
+        else:
+            ax.set_ylabel('Number of correspondences')
+
+        '''# Initialise the x-axis tick labels
+        labels = []
+        for tick in x_axis:
+            # Create label for each age bracket tick
+            labels.append('{} - {}'.format(tick, tick + window_size))
+
+        # Put ticks at all bins
+        ax.set_xticks(x_axis)
+        # Set the label parameters
+        ax.set_xticklabels(labels, fontdict={'fontsize': 5,
+                                             'fontweight': 5,
+                                             'verticalalignment': 'baseline',
+                                             'horizontalalignment': 'center'})
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")'''
+
+        # Create the plot legend
+        ax.legend()
+
+        # Save the figure in the appropriate path if necessary
+        if save_fig:
+            plt.savefig('age_windows/' + save_files[c])
+
+        # Show the figure if necessary
+        if show_fig:
+            plt.show()
+
+        # Close the plot before continuing
+        plt.close()
+
+
+def age_window_animation(method, p=0.1,
+                         prediction_filter='All', filter_threshold=25.0,
+                         window_size=10, normalise=True,
+                         gap=0.2, label_areas=True,
+                         save_gif=True, show_animation=True):
+    """
+    Show an animated bar chart of the change in region correspondences over age brackets for a given method and
+    percentage.
+
+    String :param method:   The method whose correspondences to examine
+
+    float :param p: The top percentage of saliency map activation correspondences to examine (Default: 0.1)
+
+    String :param prediction_filter:    The group of test subjects to be examined, depending on the disparity between
+    chronological age and predicted brain age (Default: 'All')
+
+    float :param filter_threshold:  The threshold for the inlier/outlier categorisation in absolute percent
+    (Default: 25.0)
+
+    int :param window_size: The number of years to include in the age window for each 'scan' of correspondences
+    (Default: 10)
+
+    bool :param normalise:  Whether or not to normalise the region correspondence count by the total number of voxels
+    per region (Default: True)
+
+    float :param gap:   The size of the gap between bars in the histogram (Default: 0.2)
+
+    bool :param label_areas:    Whether or not to label the areas of the brain on the x-axis with their names (Default:
+    True)
+
+    bool :param save_gif:   Whether or not to save the compiled animation (Default: True)
+
+    bool :param show_animation: Whether or not to show the compiled animation (Default: True)
+    """
+
+    # Initialise bar width according to the gap
+    bar_width = 1.0 - gap
+    # Load the appropriate correspondences file
+    corresp = np.load('ageing_correspondences/{}_ageing_correspondences_{}%.npy'.format(method, int(100 * p)),
+                      allow_pickle=True)
+    # Normalise the correspondence count by the total number of voxels in each region if necessary
+    if normalise:
+        all_vols = np.load('ageing_correspondences/region_volumes.npy', allow_pickle=True)
+        corresp = np.divide(corresp, all_vols)
+    # Load the ages file
+    ages = np.load('test_data/test_ages_GCN.npy', allow_pickle=True)
+    # Load the predictions file
+    predictions = np.load('test_data/all_age_predictions.npy', allow_pickle=True).astype(np.float32)
+    # Calculate age prediction disparity
+    disparity = 100 * (np.abs(ages - predictions)/ages)
+
+    # Create the plot title
+    title = 'Top-{}% Correspondences per Region over {}-year Age Windows via ${}$'.format(int(100 * p),
+                                                                                          window_size,
+                                                                                          method)
+    # Create the save file name
+    save_path = '{}_top-{}%_age_brackets.gif'.format(method, int(100 * p))
+
+    # Find individuals with relevant disparities according to the filter
+    if prediction_filter == 'Outliers':
+        disparity = (disparity > filter_threshold).astype(int)
+
+        # Edit title accordingly
+        title = '{}% MAPE Outliers` '.format(filter_threshold) + title
+        # Edit the save file name accordingly
+        save_path = '{}%_out_'.format(int(filter_threshold)) + save_path
+    elif prediction_filter == 'Inliers':
+        disparity = (disparity <= filter_threshold).astype(int)
+
+        # Edit title accordingly
+        title = '{}% MAPE Inliers` '.format(filter_threshold) + title
+        # Edit the save file name accordingly
+        save_path = '{}%_in_'.format(int(filter_threshold)) + save_path
+    else:
+        disparity = ages/ages
+
+    # Filter out the non-relevant correspondences and ages
+    corresp = corresp[disparity == 1, :]
+    ages = ages[disparity == 1]
+
+    # Find the maximum region correspondence
+    mx_prop = (np.max(np.mean(corresp, axis=0)) + np.max(corresp))/2
+
+    # Find the extreme ages
+    mx = np.max(ages)
+    mn = np.min(ages)
+    # print("Max age in test set: {}\nMin age in test set: {}\n".format(mx, mn))
+
+    # The first value assumed by the lowest value in the window (at the first step)
+    window_min = mn
+    # The highest possible value to be assumed by the lowest window value (at the final step)
+    window_max = mx - window_size
+    # The number of scans that will be completed by the window -- equal to the ceiling of the range in ages
+    rng = np.ceil(window_max - window_min + 1).astype(int)
+
+    # Initialise the figure and subplots
+    fig, ax = plt.subplots(1, 1, figsize=(15, 8))
+    # Create the x-axis
+    x_axis = np.linspace(start=1, stop=corresp.shape[1], num=corresp.shape[1])
+    # Create title for the whole figure
+    plt.suptitle(title)
+    ax.text(0, mx_prop, '')
+    # Point the camera at the figure
+    camera = Camera(fig)
+
+    for i in range(rng):
+        # Shift the beginning and end of the window to the next position
+        age_min = window_min + i
+        age_max = age_min + window_size
+
+        # Isolate ages lying in the window as ones on a background of zeros
+        ages_in_window = (ages >= age_min).astype(int) * (ages <= age_max).astype(int)
+
+        # Count how many individuals lie in the given age bracket
+        window_count = np.sum(ages_in_window)
+        # print("\tNumber of individuals in the test set lying within the age window: {}".format(window_count))
+
+        # Get the correspondences of the patients whose ages lie in the window
+        window_corresp = corresp[ages_in_window == 1]
+        # Average the correspondences across the individuals in the window
+        window_corresp = np.mean(window_corresp, axis=0)
+
+        # Plot 'frames' of bar chart for each age bracket
+        ax.bar(x_axis,
+               window_corresp,
+               width=bar_width,
+               color='b')
+        # Show the age bracket
+        ax.text(0, mx_prop, '{}y - {}y with {} individuals'.format(age_min, age_max, window_count))
+        # Set the axis labels
+        ax.set_xlabel('Brain Region')
+        ax.set_ylabel('Proportion of Corresponding Voxels')
+        # Set the y-axis limits
+        ax.set_ylim(0, 1.1*mx_prop)
+
+        # Label areas with full region names
+        if label_areas:
+            # Fetch region names
+            labels = get_region_names(x_axis)
+            # Put ticks at all bins
+            ax.set_xticks(x_axis)
+            # Set the label parameters
+            ax.set_xticklabels(labels, fontdict={'fontsize': 5,
+                                                 'fontweight': 5,
+                                                 'verticalalignment': 'baseline',
+                                                 'horizontalalignment': 'center'})
+            plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+
+        # Take snapshot of the barchart
+        camera.snap()
+        ax.text(0, mx_prop, '')
+
+    # Compile the animation
+    animation = camera.animate(blit=False, interval=900)
+
+    # Save the animation as a .gif file if necessary
+    if save_gif:
+        animation.save('age_windows/' + save_path)
+
+    # Display animation if necessary
+    if show_animation:
+        plt.show()
+
+    # Close pyplot after the saving and/or display to clear memory
+    plt.close()
+
+
+def prediction_disparities(show_disparity=False, save_fig=False):
+    """
+    Creates and (optionally) saves plot of the chronological age and the predicted age of test set subjects, or the
+    disparity between the two
+
+    bool :param show_disparity: Whether to show the disparity  measures, as opposed to the ages and predictions
+    themselves (Default: False)
+
+    bool :param save_fig:   Whether or not to save the figure automatically (Default: False)
+    """
+
+    # Load the ages and predictions files
+    ages = np.load('test_data/test_ages_GCN.npy', allow_pickle=True)
+    predictions = np.load('test_data/all_age_predictions.npy', allow_pickle=True).astype(np.float32)
+
+    # Create the x-axis
+    x_axis = np.linspace(0, len(ages), len(ages))
+
+    # Plot only the differences between the ages and predictions if necessary
+    if show_disparity:
+        # Calculate the disparity (absolute, in years)
+        disparity = np.abs(ages - predictions)
+        # Calculate the percentage absolute disparity
+        percent_disparity = 100*(disparity/ages)
+
+        # Find the maximum of all the disparities
+        mx_1 = np.max(disparity)
+        mx_2 = np.max(percent_disparity)
+        mx = max(mx_1, mx_2)
+
+        # Plot the disparity curves and label them appropriately
+        plt.plot(x_axis, disparity,
+                 label='Absolute Difference\n(Mean = {}y)'.format(np.round(np.mean(disparity), 2)))
+        plt.plot(x_axis, percent_disparity,
+                 label='Absolute Percentage Difference\n(Mean: {}%)'.format(np.round(np.mean(percent_disparity), 2)))
+        # Create the appropriate plot title
+        plt.title('Disparity Between Chronological Age and Predicted Brain Age')
+
+        # Create the appropriate save title
+        save_title = 'age_prediction_disparity'
+    # Plot only the ages and predictions otherwise
+    else:
+        # Find the maximum of all the ages (predicted or actual)
+        mx_1 = np.max(ages)
+        mx_2 = np.max(predictions)
+        mx = max(mx_1, mx_2)
+
+        # Plot the age and prediction curves
+        plt.plot(x_axis, ages, label='Chronological Age')
+        plt.plot(x_axis, predictions, label='Predicted Brain Age')
+        # Create the appropriate plot title
+        plt.title('Chronological Ages vs. Predicted Brain Ages in Test Set')
+        # Label the y-axis
+        plt.ylabel('Years')
+
+        # Create the appropriate save title
+        save_title = 'age_vs_prediction'
+
+    # Create the legend
+    plt.legend()
+    # Set the y-axis limits
+    plt.ylim(0, 1.1*mx)
+    # Label the x-axis
+    plt.xlabel('Patient in Test Set')
+
+    # Save the figure automatically if necessary
+    if save_fig:
+        plt.savefig('test_data/{}'.format(save_title))
+
+    # Show the image
+    plt.show()
+
+
+def correlation_matrix(method, p, save_fig=True, show_fig=True):
+    """
+    Creates and displays the correlation matrix for the region correspondences file of the given method and top-p%
+    activations
+
+    String :param method:   The method whose correspondence matrix to examine
+
+    float :param p: The percentage of top voxel activations to consider in the correspondences from the saliency maps of
+    the given method
+
+    bool :param save_fig:   Whether or not to save the generated figure (Default: True)
+
+    bool :param show_fig:   Whether or not to show the generated figure (Default: True)
+    """
+
+    # Load correspondence file -- shape: (132, 102) (patients, regions)
+    corresp = np.load('ageing_correspondences/{}_ageing_correspondences_{}%.npy'.format(method, int(100*p)),
+                      allow_pickle=True)
+    # Load all region volumes
+    vols = np.load('ageing_correspondences/region_volumes.npy', allow_pickle=True)
+    # Normalise the correspondences by the total region volumes
+    corresp = corresp/vols
+
+    # Calculate the correlation matrix for regions across individuals in the test set
+    # 'rowvar' set to False to allow regions to be considered variables and individuals the observations thereof
+    # (rows vs columns)
+    correlation_mtx = np.corrcoef(corresp, rowvar=False)
+
+    # create the figure and axis
+    fig, ax = plt.subplots(1, 1, figsize=(11, 8))
+    # Create axis
+    axis = np.linspace(start=1, stop=correlation_mtx.shape[0], num=correlation_mtx.shape[0])
+
+    # Fetch region names
+    labels = get_region_names(axis)
+    # Put ticks at all points
+    ax.set_xticks(axis - 1)
+    ax.set_yticks(axis - 1)
+    # Puth the x-axis ticks at the top of the image
+    ax.xaxis.tick_top()
+    # Set the label parameters
+    ax.set_xticklabels(labels, fontdict={'fontsize': 5,
+                                         'fontweight': 5,
+                                         'verticalalignment': 'center',
+                                         'horizontalalignment': 'center'})
+    ax.set_yticklabels(labels, fontdict={'fontsize': 5,
+                                         'fontweight': 5,
+                                         'verticalalignment': 'center',
+                                         'horizontalalignment': 'center'})
+    plt.setp(ax.get_xticklabels(), rotation=90, ha="left", rotation_mode="anchor")
+    plt.setp(ax.get_yticklabels(), rotation=0, ha="right", rotation_mode="anchor")
+
+    # Display the matrix on axes
+    plt.imshow(correlation_mtx, cmap='Reds')
+    # Create the title, at the bottom of the figure
+    plt.title('${}$ Top-{}% Region Correspondences Correlation Matrix'.format(method, int(100*p)), y=-0.075)
+    # Display colour bar
+    plt.colorbar()
+
+    # Show the figure if necessary
+    if show_fig:
+        plt.show()
+
+    if save_fig:
+        plt.savefig('ageing_correlations/{}_{}%_corr_mtx'.format(method, int(100*p)))
+
+
 def compare_masking_heatmap(vol, index):
     region_vol = get_region_volume(index)
 
@@ -472,16 +1080,33 @@ def masking_analysis(method):
     print('Not finished yet')
 
 
+'''for mthd in ['DeepLIFT', 'LRP_1', 'LRP_2', 'LRP_3']:
+    for pct in [0.1, 0.05, 0.02, 0.01]:
+        # sliding_age_window(mthd, p=pct, n_to_label=5, save_fig=True, show_fig=False)
+        # age_window_animation(mthd, p=pct, save_gif=True, show_animation=False)
+        # correlation_matrix(mthd, pct, save_fig=True, show_fig=False)
+        print('\rSaved images for {} {}%'.format(mthd, int(100 * pct)), end='')'''
+
+'''correlation_matrix('DeepLIFT', 0.1, save_fig=False)'''
+
+'''sliding_age_window('DeepLIFT', p=0.01, prediction_filter='Inliers', filter_threshold=25.0, save_fig=False)'''
+
+'''age_window_animation('DeepLIFT', p=0.01, prediction_filter='Outliers', filter_threshold=15.0, save_gif=False)'''
+
+'''prediction_disparities(False)'''
+
 '''visualise_correspondences_masking('LRP_1', p=0.01, label_areas=True, save_fig=False)'''
 
 
 '''visualise_lr_symmetry('LRP_1', p=0.01, log=False,
+                      prediction_filter='Outliers', filter_threshold=25.0,
                       gap=0.2, label_areas=True,
                       normalise=True, save_fig=False)'''
 
 
-'''visualise_correspondences_ageing(['DeepLIFT', 'DeepLIFT'], p=[0.1, 0.05], log=False,
+'''visualise_correspondences_ageing(['LRP_1'], p=[0.01], log=False,
+                                 prediction_filter=['All'], filter_threshold=25.0,
                                  average=True, dividing_line=False,
-                                 gap=0.2, use_symmetry=True,
+                                 gap=0.2, use_symmetry=False,
                                  label_areas=True, normalise=True,
-                                 save_fig=True)'''
+                                 save_fig=False)'''
